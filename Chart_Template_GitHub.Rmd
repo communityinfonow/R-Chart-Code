@@ -1,0 +1,2176 @@
+---
+title: "Chart code template"
+author: "Community Information Now (CINow)"
+prepared by: "Cristina E. Martinez Ph.D, Paulina Cano Ph.D"
+output: html_document
+---
+
+This code can be used as a template to create different types of charts for reports and other projects.
+Be sure to read notes carefully. Once you start running actual chart chunks, run the whole chunk everytime by clicking 
+the arrow at the top right of the chunk or pressing Ctrl + Shift + Enter when the cursor is anywhere inside the chunk.
+
+For more resources on understanding how ggplot works you can review the following literature:
+<https://ggplot2-book.org/>
+<https://r4ds.hadley.nz/>
+<https://r-graph-gallery.com/>
+<https://urbaninstitute.github.io/r-at-urban/graphics-guide.html>
+
+```{r setup, message=FALSE, warning=FALSE}
+
+# Load the list of libraries we'll need to run all the code
+library(tidyverse)
+library(foreign)
+library(extrafont)
+library(magick)
+library(RColorBrewer)
+library(scales)
+library(grid)
+library(gtable)
+library(ggthemes)
+library(ggrepel)
+library(Cairo)
+library(svglite)
+library(showtext)
+library(googlesheets4)
+
+## Save file path for later use when saving charts with function
+## This should lead to a charts folder within a specific project
+path <- ("U:/Folder/Subfolder/")
+
+# Organization the project is for typed out the way we want it to appear in charts
+org <- "Name of Organization"
+```
+
+# Load data
+
+If you're using a google sheet, you'll have to give R access to your google account. 
+Once you install and try to run a `googlesheets4` function, you will be prompted to enter your google credentials. 
+See more info here:
+<https://github.com/tidyverse/googlesheets4>
+<https://googlesheets4.tidyverse.org/articles/googlesheets4.html>
+
+```{r}
+## The code below will read in the formatted data sheet
+## First save the link to the google sheet to an object
+## should look like this:
+## link <- "https://docs.google.com/spreadsheets/XXXX"
+
+link <- "Insert link here"
+
+## To read in the data, use `read_sheet()` with link as the argument and specify the sheet you want to load, 
+## most likely 1, but depends on where your data is
+## You'll probably also have to specify the class of each column: c = character, n = numeric
+## Column types are currently set to default data sheet
+
+data <- read_sheet(link, sheet = 1, skip = 1, col_types = "nnnccccccnccnnnncccnnc"); rm(link)
+```
+
+# Recode
+```{r}
+## Some default recoding of the data for file paths, reliability flags, and other things
+
+data1 <- data %>%
+  mutate(
+    ## Add text before Figure numbers
+    FIGNUM = paste0("Fig. ", FIGNUM),
+    
+    ## This will change the SAVETITLE column to specify the section of the chart it should be in and a figure number
+    ## Usually useful for large reports as it will create new folders where the charts will be saved
+    SAVETITLE = paste0(FIGNUM, "_", SAVETITLE),
+    
+    ## Get MIN and MAX for estimates with MOE
+    MIN = if_else(is.na(MOE) == F, ESTIMATE - MOE, MIN),
+    MAX = if_else(is.na(MOE) == F, ESTIMATE + MOE, MAX),
+    
+    ## Convert negative MIN values to 0
+    MIN = if_else(MIN < 0, 0, MIN),
+    
+    ## Add axis limits
+    YMIN = if_else(is.na(MIN) == F, MIN, YMIN),
+    YMAX = if_else(is.na(MAX) == F, MAX, YMAX),
+    
+    ## Calculate the coefficient of variation to determine ACS estimate reliability
+    ## Use the first line if it is only ACS data, use the second if there are ACS and BRFSS estimates
+    ## Comment out the one you don't need with a '#' before it
+    ## If there are other data sources that need a reliability calculations, code will have to be modified
+    cv = (MOE/1.645)/ESTIMATE, # ACS only
+    #cv = if_else(str_detect(SOURCE, "ACS"), (MOE/1.645)/ESTIMATE, MOE/ESTIMATE), # ACS & BRFSS
+    
+    ## Adding asterisks to show reliabitliy
+    RELIABILITY = case_when(
+      is.na(RELIABILITY) == F ~ RELIABILITY,
+      cv >= .3 & str_detect(SOURCE, "BRFSS")~ "*",
+      cv >  .4  ~ "*",
+      .default = ""
+    ),
+    
+    ## Add reliability note
+    rNOTE = case_when(
+      RELIABILITY == "*"  ~ "*Unreliable: Error is too large relative to estimate.",
+      RELIABILITY == "**" ~ "**Suppressed.",
+      .default = ""
+    ),
+    
+    ## For ACS Data, we want to provide the table number, I add it to the SOURCE column here
+    TABLENUM = if_else(is.na(TABLENUM) == F, paste0('. Table: ', TABLENUM), ""),
+    SOURCE = paste0(SOURCE, TABLENUM),
+    
+    ## Changing missing values to NA
+    ESTIMATE = if_else(ESTIMATE == -99, NA_real_, ESTIMATE)
+    
+  ) %>%
+  group_by(SAVETITLE) %>%  # Groups by SAVETITLE to add any rNOTES to all observations for the chart
+  mutate(rNOTE = max(rNOTE)) %>%
+  ungroup() %>%
+  mutate(
+    ## Some more shuffling with chart notes and reliability notes to make sure there are no gaps in chart captions
+    CHARTNOTES = if_else(is.na(CHARTNOTES) == F, CHARTNOTES, ""),
+    rNOTE      = if_else(is.na(CHARTNOTES) == F & rNOTE == "", CHARTNOTES, rNOTE),
+    CHARTNOTES = if_else(CHARTNOTES == rNOTE, "", CHARTNOTES)
+
+  )
+```
+
+# Separate data by chart types
+```{r separate data}
+
+# BAR CHARTS
+barchart <- filter(data1, CHARTTYPE == 1)
+barxl    <- filter(data1, CHARTTYPE == 2) 
+bargroup <- filter(data1, CHARTTYPE == 3)
+barstack <- filter(data1, CHARTTYPE == 4)
+ 
+# TRENDLINE CHARTS
+trendline   <- filter(data1, CHARTTYPE == 5) %>% mutate(YEAR = as.numeric(YEAR))
+trendline.m <- filter(data1, CHARTTYPE == 6) %>% mutate(YEAR = as.numeric(YEAR))
+
+# OTHER CHARTS
+segment <- filter(data1, CHARTTYPE == 7)
+facet   <- filter(data1, CHARTTYPE == 8)
+share   <- filter(data1, CHARTTYPE == 9)
+
+
+```
+
+# Set colors
+```{r}
+## There are lots of different ways to set colors. HEX color codes are easiest to use.
+## For most projects, setting a vector of colors like the example below generally works.
+## You want to make sure you have as many colors as the chart with the highest number of unique labels
+## Try to keep it less than 10 for best data practices
+
+## For single color charts, set one color
+color1 <- "#11619a"
+
+# For multiple color charts, set multiple colors as a vector
+colors1 <- c("#11619a", "#30b44a", "#ff6900", "#9b51e0", "#fcb900", "#cf2e2e", "gray50", "#11619e", "#30b44e", "#ff6920")
+```
+
+# Set themes
+```{r}
+# For code brevity, using a function to set the chart theme if you need to change font sizes for all charts, 
+# change the theme here. Font sizes for specific types of charts can be modified in their corresponding code chunk.
+chart_theme <- function(){
+  theme(
+    
+    ## remove panel, set background color
+    panel.grid.major = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    
+    ## adjust font sizes and text colors 
+    plot.margin = unit(c(.5, 1.5, .5, .5), "cm"), #top, right, bottom, left
+    
+    plot.title.position = "plot",
+    plot.title    = element_text(size=15, face='bold', color="#2C4B65"),
+    plot.subtitle = element_text(size = 14, color="#636466"),
+    plot.caption  = element_text(size = 10.5, color="#105760"),
+    
+    axis.text.x = element_text(size = 12, color = "gray29"),
+    axis.text.y = element_text(size = 11, color = "gray29"),
+    axis.line   = element_line(linewidth = .6, colour = "gray60")
+    
+    ## set font for chart area
+    # axis.title = element_text(family= "foo"),
+    # axis.text  = element_text(family= "foo")
+  )
+}
+
+# legend theme for grouped bar charts
+legend_theme <- function(){
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.spacing.x = unit(.5, 'cm'),
+    legend.text = element_text(size = 10),
+    #remove panel, set background color and reorder items in legend
+    panel.grid.major = element_blank(),
+    panel.background = element_rect(fill = "white")
+  )
+}
+
+# theme for multiple trendline charts
+line_theme <- function(){
+  theme(
+    
+    # remove panel, set background color and reorder items in legend
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_line(size=.08, color="grey89"), 
+    panel.background = element_rect(fill = "white"),
+    
+    # modify legend
+    legend.position="top", 
+    legend.title = element_blank(),
+    legend.spacing.y = unit(.3, 'cm'),
+    legend.text = element_text(size = 12),
+    legend.key = element_rect(fill = NA),
+    
+    # plot modification
+    plot.margin = unit(c(.5, .9, .5, .5), "cm"), #top, right, bottom, left
+    plot.title.position = "plot",
+    plot.title = element_text(size=15, face='bold', color="#2C4B65"),
+    plot.subtitle = element_text(size = 14, color="#636466"),
+    plot.caption = element_text(size = 10.5, color="#105760"),
+    
+    # plot text
+    axis.text.x = element_text(size = 14.5, color = "gray29"),
+    axis.text.y = element_text(size = 13.5, color = "gray29"),
+    axis.line = element_line(linewidth = .6, color="gray60")
+    
+    ## set font for chart area
+    # axis.title = element_text(family= "foo"),
+    # axis.text  = element_text(family= "foo")
+  )
+}
+```
+
+# Bar charts
+
+## Percent bar charts
+```{r barpercent}
+barpercent <- filter(barchart, NUMTYPE == 1)
+
+# create graphing function
+barpercent.graph <- function(barpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barpercent$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barpercent, adds error bars to plot, 
+    plot <- ggplot(subset(barpercent, barpercent$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F), "%", 
+                               RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T), "%",
+                               RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(barpercent$MIN[barpercent$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE, "%"),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barpercent$MAX[barpercent$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barpercent$FIGNUM[barpercent$SAVETITLE == title_list[i]], " ",
+            barpercent$CHARTTITLE[barpercent$SAVETITLE == title_list[i]], ", ",
+            barpercent$YEAR[barpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barpercent$CHARTSUBTITLE[barpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]] != "" & 
+                  barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barpercent.graph(barpercent, ESTIMATE)
+```
+
+## Count bar charts
+```{r barcount}
+barcount <- filter(barchart, NUMTYPE == 2)
+
+# create graphing function
+barcount.graph <- function(barcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barcount$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barcount, adds error bars to plot, 
+    plot <- ggplot(subset(barcount, barcount$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F),
+                               RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T),
+                               RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(barcount$MIN[barcount$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barcount$MAX[barcount$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barcount$FIGNUM[barcount$SAVETITLE == title_list[i]], " ",
+            barcount$CHARTTITLE[barcount$SAVETITLE == title_list[i]], ", ",
+            barcount$YEAR[barcount$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barcount$CHARTSUBTITLE[barcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barcount$rNOTE[barcount$SAVETITLE == title_list[i]] != "" & 
+                  barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barcount.graph(barcount, ESTIMATE)
+```
+
+## Dollar bar charts
+```{r bardollar}
+bardollar <- filter(barchart, NUMTYPE == 3)
+
+# create graphing function
+bardollar.graph <- function(bardollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(bardollar$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in bardollar, adds error bars to plot, 
+    plot <- ggplot(subset(bardollar, bardollar$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                               drop0trailing = FALSE), RELIABILITY),
+                                paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",", 
+                                               drop0trailing = TRUE), RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(bardollar$MIN[bardollar$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0("$", ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(bardollar$MAX[bardollar$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            bardollar$FIGNUM[bardollar$SAVETITLE == title_list[i]], " ",
+            bardollar$CHARTTITLE[bardollar$SAVETITLE == title_list[i]], ", ",
+            bardollar$YEAR[bardollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = bardollar$CHARTSUBTITLE[bardollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]] != "" & 
+                  bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+bardollar.graph(bardollar, ESTIMATE)
+```
+
+# XL Bar charts
+
+## Percent XL bar charts
+```{r barpercent XL}
+barpercent <- filter(barxl, NUMTYPE == 1)
+
+# create graphing function
+barpercent.graph <- function(barpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barpercent$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barpercent, adds error bars to plot, 
+    plot <- ggplot(subset(barpercent, barpercent$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F), "%", 
+                                   RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T), "%",
+                               RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(barpercent$MIN[barpercent$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE, "%"),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barpercent$MAX[barpercent$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.05))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barpercent$FIGNUM[barpercent$SAVETITLE == title_list[i]], " ",
+            barpercent$CHARTTITLE[barpercent$SAVETITLE == title_list[i]], ", ",
+            barpercent$YEAR[barpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barpercent$CHARTSUBTITLE[barpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]] != "" & 
+                  barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(title_list[i], device = ".png"), width = 8, height = 9)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barpercent.graph(barpercent, ESTIMATE)
+```
+
+## Count XL bar charts
+```{r barcount XL}
+barcount <- filter(barxl, NUMTYPE == 2)
+
+# create graphing function
+barcount.graph <- function(barcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barcount$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barcount, adds error bars to plot, 
+    plot <- ggplot(subset(barcount, barcount$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F),
+                               RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T),
+                               RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(barcount$MIN[barcount$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barcount$MAX[barcount$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.05))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barcount$FIGNUM[barcount$SAVETITLE == title_list[i]], " ",
+            barcount$CHARTTITLE[barcount$SAVETITLE == title_list[i]], ", ",
+            barcount$YEAR[barcount$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barcount$CHARTSUBTITLE[barcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barcount$rNOTE[barcount$SAVETITLE == title_list[i]] != "" & 
+                  barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 9)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barcount.graph(barcount, ESTIMATE)
+```
+
+## Dollar XL bar charts
+```{r bardollar XL}
+bardollar <- filter(barxl, NUMTYPE == 3)
+
+# create graphing function
+bardollar.graph <- function(bardollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(bardollar$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in bardollar, adds error bars to plot, 
+    plot <- ggplot(subset(bardollar, bardollar$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), -CHARTORDER), y = ESTIMATE)) + 
+        geom_bar(fill = color1,
+        stat = "identity",
+        colour = "transparent",
+        width = 0.75) + 
+      
+      #Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7)+ 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                               drop0trailing = FALSE), RELIABILITY),
+                                paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",", 
+                                               drop0trailing = TRUE), RELIABILITY))), 
+                size = 4,
+                hjust=-.2, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(bardollar$MIN[bardollar$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0("$", ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(bardollar$MAX[bardollar$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(0,.05))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            bardollar$FIGNUM[bardollar$SAVETITLE == title_list[i]], " ",
+            bardollar$CHARTTITLE[bardollar$SAVETITLE == title_list[i]], ", ",
+            bardollar$YEAR[bardollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = bardollar$CHARTSUBTITLE[bardollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]] != "" & 
+                  bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 9)
+    print(plot)
+  }
+}
+
+# run graphing function 
+bardollar.graph(bardollar, ESTIMATE)
+```
+
+# Grouped bar charts
+
+Currently, these are set to output to a regular 8x5 size. If you need these to be the length of XL bar charts,
+copy the chunk you need (percent/count/dollar) and change the ggsave() height argument to 9
+
+## Percent group bar charts
+```{r barpercent group}
+barpercent <- filter(bargroup, NUMTYPE == 1)
+
+# create graphing function
+barpercent.graph <- function(barpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barpercent$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barpercent, adds error bars to plot, 
+    # establish position and change color
+    plot <- ggplot(subset(barpercent, barpercent$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,20), -CHARTORDER), y = ESTIMATE, 
+            color = GROUPLABEL, group = GROUPLABEL)) + 
+        geom_bar(aes(fill = GROUPLABEL),
+        stat = "identity",
+        colour = "transparent",
+        width = 0.9,
+        position = position_dodge2(width = .9, reverse = TRUE, padding = .2)) + 
+      
+      # Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7, 
+                    show.legend = FALSE, 
+                    position = position_dodge(.9))+ 
+    
+      # labels in bars, paste necessary symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                               drop0trailing = FALSE), "%", RELIABILITY),
+                                paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", 
+                                               drop0trailing = TRUE), "%", RELIABILITY))), 
+                size=3.5, 
+                hjust=-.2,
+                fontface="bold",
+                show.legend = FALSE,
+                position = position_dodge2(width=.9, reverse = TRUE, padding = .2), 
+                vjust= if_else(barpercent$MAX[barpercent$SAVETITLE == title_list[i]] > 0, -0.5, 0))+  
+      
+      #Set colors
+      scale_color_manual("GROUPLABEL", values = colors1) +
+      scale_fill_manual("GROUPLABEL",  values = colors1) +
+      guides(fill = guide_legend(reverse = FALSE)) +
+      coord_flip()+
+      
+      # Format y axis values and adjust limits.
+      scale_y_continuous(labels = function(ESTIMATE) paste0(ESTIMATE, "%"),
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barpercent$MAX[barpercent$SAVETITLE == title_list[i]])))+
+      
+      # Automates chart text and specified x and y labels as blank
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barpercent$FIGNUM[barpercent$SAVETITLE == title_list[i]], " ",
+            barpercent$CHARTTITLE[barpercent$SAVETITLE == title_list[i]], ", ",
+            barpercent$YEAR[barpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barpercent$CHARTSUBTITLE[barpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]] != "" & 
+                  barpercent$CHARTNOTES[barpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barpercent$rNOTE[barpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barpercent$SOURCE[barpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      chart_theme() +
+      legend_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barpercent.graph(barpercent, ESTIMATE)
+```
+
+## Count group  bar charts
+```{r barcount group}
+barcount <- filter(bargroup, NUMTYPE == 2)
+
+# create graphing function
+barcount.graph <- function(barcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barcount$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barcount, adds error bars to plot, 
+    # establish position and change color
+    plot <- ggplot(subset(barcount, barcount$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,20), -CHARTORDER), y = ESTIMATE, 
+            color = GROUPLABEL, group = GROUPLABEL)) + 
+        geom_bar(aes(fill = GROUPLABEL),
+        stat = "identity",
+        colour = "transparent",
+        width = 0.9,
+        position = position_dodge2(width = .9, reverse = TRUE, padding = .2)) + 
+      
+      # Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7, 
+                    show.legend = FALSE, 
+                    position = position_dodge(.9))+ 
+    
+      # labels in bars, paste necessary symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                               drop0trailing = FALSE), RELIABILITY),
+                                paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", 
+                                               drop0trailing = TRUE), RELIABILITY))), 
+                size=3.5, 
+                hjust=-.2,
+                fontface="bold",
+                show.legend = FALSE,
+                position = position_dodge2(width=.9, reverse = TRUE, padding = .2), 
+                vjust= if_else(barcount$MAX[barcount$SAVETITLE == title_list[i]] > 0, -0.5, 0))+  
+      
+      #Set colors
+      scale_color_manual("GROUPLABEL", values = colors1) +
+      scale_fill_manual("GROUPLABEL",  values = colors1) +
+      guides(fill = guide_legend(reverse = FALSE)) +
+      coord_flip()+
+      
+      # Format y axis values and adjust limits.
+      scale_y_continuous(labels = function(ESTIMATE) paste0(ESTIMATE),
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(barcount$MAX[barcount$SAVETITLE == title_list[i]])))+
+      
+      # Automates chart text and specified x and y labels as blank
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barcount$FIGNUM[barcount$SAVETITLE == title_list[i]], " ",
+            barcount$CHARTTITLE[barcount$SAVETITLE == title_list[i]], ", ",
+            barcount$YEAR[barcount$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barcount$CHARTSUBTITLE[barcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barcount$rNOTE[barcount$SAVETITLE == title_list[i]] != "" & 
+                  barcount$CHARTNOTES[barcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barcount$rNOTE[barcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barcount$SOURCE[barcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      chart_theme() +
+      legend_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barcount.graph(barcount, ESTIMATE)
+```
+
+## Dollar group  bar charts
+```{r bardollar group}
+bardollar <- filter(bargroup, NUMTYPE == 3)
+
+# create graphing function
+bardollar.graph <- function(bardollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(bardollar$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in bardollar, adds error bars to plot, 
+    # establish position and change color
+    plot <- ggplot(subset(bardollar, bardollar$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,20), -CHARTORDER), y = ESTIMATE, 
+            color = GROUPLABEL, group = GROUPLABEL)) + 
+        geom_bar(aes(fill = GROUPLABEL),
+        stat = "identity",
+        colour = "transparent",
+        width = 0.9,
+        position = position_dodge2(width = .9, reverse = TRUE, padding = .2)) + 
+      
+      # Error bars 
+      geom_errorbar(aes(ymax = MAX, ymin= MIN), 
+                    color = "gray70", 
+                    width=.1, 
+                    size=.7, 
+                    show.legend = FALSE, 
+                    position = position_dodge(.9))+ 
+    
+      # labels in bars, paste necessary symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                               drop0trailing = FALSE), RELIABILITY),
+                                paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",", 
+                                               drop0trailing = TRUE), RELIABILITY))), 
+                size=3.5, 
+                hjust=-.2,
+                fontface="bold",
+                show.legend = FALSE,
+                position = position_dodge2(width=.9, reverse = TRUE, padding = .2), 
+                vjust= if_else(bardollar$MAX[bardollar$SAVETITLE == title_list[i]] > 0, -0.5, 0))+  
+      
+      #Set colors
+      scale_color_manual("GROUPLABEL", values = colors1) +
+      scale_fill_manual("GROUPLABEL",  values = colors1) +
+      guides(fill = guide_legend(reverse = FALSE)) +
+      coord_flip()+
+      
+      # Format y axis values and adjust limits.
+      scale_y_continuous(labels = function(ESTIMATE) paste0("$", ESTIMATE),
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(bardollar$MAX[bardollar$SAVETITLE == title_list[i]])))+
+      
+      # Automates chart text and specified x and y labels as blank
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            bardollar$FIGNUM[bardollar$SAVETITLE == title_list[i]], " ",
+            bardollar$CHARTTITLE[bardollar$SAVETITLE == title_list[i]], ", ",
+            bardollar$YEAR[bardollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = bardollar$CHARTSUBTITLE[bardollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]] != "" & 
+                  bardollar$CHARTNOTES[bardollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(bardollar$rNOTE[bardollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(bardollar$SOURCE[bardollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      chart_theme() +
+      legend_theme()
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+bardollar.graph(bardollar, ESTIMATE)
+```
+
+# Stacked bar chart
+
+This should really only be used when the indicators you're stacking equal to 100%
+
+## Percent stacked bar chart
+```{r barstack}
+# create graphing function
+barstack.graph <- function(barstack, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(barstack$SAVETITLE)
+  
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in barstack, adds error bars to plot, 
+    # establish position and change color
+    plot <- ggplot(subset(barstack, barstack$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,20), -CHARTORDER), y = ESTIMATE, 
+            color = GROUPLABEL, group = GROUPLABEL)) + 
+        geom_bar(aes(fill = GROUPLABEL),
+        stat = "identity",
+        colour = "transparent",
+        position =  position_stack(reverse = T)) + 
+    
+      #labels in bars, paste % symbol, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1, 
+                                    paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                   drop0trailing = F), "%", RELIABILITY),
+                                    paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                   drop0trailing = T), "%", RELIABILITY))), 
+                position = position_stack(vjust = 0.5, reverse = T), 
+                size=4, 
+                fontface="bold", 
+                color = "white")+  
+      
+      #Set colors
+      scale_color_manual("GROUPLABEL", values = colors1) +
+      scale_fill_manual("GROUPLABEL",  values = colors1) +
+      guides(fill = guide_legend(reverse = FALSE)) +
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits.
+      scale_y_continuous(labels = function(ESTIMATE) paste0(ESTIMATE, "%"))+
+      
+      #automates title and specified x and y labels as blank
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            barstack$FIGNUM[barstack$SAVETITLE == title_list[i]], " ",
+            barstack$CHARTTITLE[barstack$SAVETITLE == title_list[i]], ", ",
+            barstack$YEAR[barstack$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = barstack$CHARTSUBTITLE[barstack$SAVETITLE == title_list[i]],
+        
+        caption = if_else(barstack$CHARTNOTES[barstack$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(barstack$CHARTNOTES[barstack$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(barstack$rNOTE[barstack$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barstack$SOURCE[barstack$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(barstack$rNOTE[barstack$SAVETITLE == title_list[i]] != "" & 
+                  barstack$CHARTNOTES[barstack$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(barstack$rNOTE[barstack$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(barstack$SOURCE[barstack$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(barstack$SOURCE[barstack$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      chart_theme() +
+      legend_theme() +
+      theme(legend.text = element_text(size = 12))
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+barstack.graph(barstack, ESTIMATE)
+```
+
+# Single trendline charts
+
+## Percent trendline
+```{r trendpercent}
+trendpercent <- filter(trendline, NUMTYPE == 1) 
+
+  # create graphing function
+  trendpercent.graph <- function(trendpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trendpercent$SAVETITLE)
+
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trendpercent, trendpercent$SAVETITLE==title_list[i]),
+             aes(x = YEAR, y = ESTIMATE, ymin = MIN, ymax = MAX)) + 
+      geom_line(color = color1, size = 1.5, alpha = .50) +  
+      geom_point(size = 2.0, color = color1)+
+      
+      # error ribbon
+      geom_ribbon (aes(ymin=MIN, ymax=MAX), fill = color1, alpha=0.1, colour=F) + 
+       
+      # labels on lines, paste appropriate symbol, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                       drop0trailing = FALSE), "%", RELIABILITY),
+                                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                       drop0trailing = TRUE), "%", RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, color=color1,
+                      nudge_x = 0, nudge_y = .1, direction = "y") + 
+
+      # Format y axis text, limits, and breaks
+      scale_y_continuous(labels=function(ESTIMATE) paste0(ESTIMATE, "%"),
+                         limits=c(min(trendpercent$YMIN[trendpercent$SAVETITLE==title_list[i]]),
+                                  max(trendpercent$YMAX[trendpercent$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         )+
+      
+      scale_x_continuous(breaks=c(trendpercent$YEAR[trendpercent$SAVETITLE==title_list[i]]),
+                          expand = expansion(mult = .1))+
+  
+      # automates title and specified x and y labels as blank
+      ggtitle(title_list[i]) +
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trendpercent$FIGNUM[trendpercent$SAVETITLE == title_list[i]], " ",
+            trendpercent$CHARTTITLE[trendpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = trendpercent$CHARTSUBTITLE[trendpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]] != "" & 
+                  trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+      
+      chart_theme() +
+      theme(panel.grid.major.y = element_line(linewidth=.08, color="grey80"))
+      
+      #Save as PNG
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trendpercent.graph(trendpercent, ESTIMATE)
+```
+
+## Count trendline
+```{r trendcount}
+trendcount <- filter(trendline, NUMTYPE == 2) 
+
+  # create graphing function
+  trendcount.graph <- function(trendcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trendcount$SAVETITLE)
+
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trendcount, trendcount$SAVETITLE==title_list[i]),
+             aes(x = YEAR, y = ESTIMATE, ymin = MIN, ymax = MAX)) + 
+      geom_line(color = color1, size = 1.5, alpha = .50) +  
+      geom_point(size = 2.0, color = color1)+
+      
+      # error ribbon
+      geom_ribbon (aes(ymin=MIN, ymax=MAX), fill = color1, alpha=0.1, colour=F) + 
+       
+      # labels on line, paste appropriate symbol, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                       drop0trailing = FALSE), RELIABILITY),
+                                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                       drop0trailing = TRUE), RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, color=color1,
+                      nudge_x = 0, nudge_y = .1, direction = "y")+ 
+
+      # Format y axis text, limits, and breaks
+      scale_y_continuous(labels=function(ESTIMATE) paste0(ESTIMATE),
+                         limits=c(min(trendcount$YMIN[trendcount$SAVETITLE==title_list[i]]),
+                                  max(trendcount$YMAX[trendcount$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         ) +
+      
+      scale_x_continuous(breaks=c(trendcount$YEAR[trendcount$SAVETITLE==title_list[i]]),
+                          expand = expansion(mult = .1))+
+  
+      #automates title and specified x and y labels as blank
+      ggtitle(title_list[i]) +
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trendcount$FIGNUM[trendcount$SAVETITLE == title_list[i]], " ",
+            trendcount$CHARTTITLE[trendcount$SAVETITLE == title_list[i]],
+            ), 80
+          ), 
+        
+        subtitle = trendcount$CHARTSUBTITLE[trendcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]] != "" & 
+                  trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+      
+      chart_theme() +
+      theme(panel.grid.major.y = element_line(linewidth=.08, color="grey80"))
+      
+      #Save as PNG
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trendcount.graph(trendcount, ESTIMATE)
+```
+
+## Dollar trendline
+```{r trenddollar}
+trenddollar <- filter(trendline, NUMTYPE == 3) 
+
+  # create graphing function
+  trenddollar.graph <- function(trenddollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trenddollar$SAVETITLE)
+
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trenddollar, trenddollar$SAVETITLE==title_list[i]),
+             aes(x = YEAR, y = ESTIMATE, ymin = MIN, ymax = MAX)) + 
+      geom_line(color = color1, size = 1.5, alpha = .50) +  
+      geom_point(size = 2.0, color = color1)+
+      
+      # error ribbon
+      geom_ribbon (aes(ymin=MIN, ymax=MAX), fill = color1, alpha=0.1, colour=F) + 
+       
+      # labels on line, paste appropriate symbol, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                        paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                       drop0trailing = FALSE), RELIABILITY),
+                                        paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                       drop0trailing = TRUE), RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, color=color1,
+                      nudge_x = 0, nudge_y = .1, direction = "y")+ 
+
+      # Format y axis text, limits, and breaks
+      scale_y_continuous(labels=function(ESTIMATE) paste0("$", ESTIMATE),
+                         limits=c(min(trenddollar$YMIN[trenddollar$SAVETITLE==title_list[i]]),
+                                  max(trenddollar$YMAX[trenddollar$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         ) +
+      
+      scale_x_continuous(breaks=c(trenddollar$YEAR[trenddollar$SAVETITLE==title_list[i]]),
+                          expand = expansion(mult = .1))+
+  
+      #automates title and specified x and y labels as blank
+      ggtitle(title_list[i]) +
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trenddollar$FIGNUM[trenddollar$SAVETITLE == title_list[i]], " ",
+            trenddollar$CHARTTITLE[trenddollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = trenddollar$CHARTSUBTITLE[trenddollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]] != "" & 
+                  trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+      
+      chart_theme() +
+      theme(panel.grid.major.y = element_line(linewidth=.08, color="grey80"))
+      
+      #Save as PNG
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trenddollar.graph(trenddollar, ESTIMATE)
+```
+
+# Multiple trendline charts
+
+## Percent multiple trendline
+```{r trendpercent mult}
+trendpercent <- filter(trendline.m, NUMTYPE == 1)
+
+  # create graphing function
+  trendpercent.graph <- function(trendpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trendpercent$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trendpercent, trendpercent$SAVETITLE==title_list[i]),
+             aes(x=YEAR, y=ESTIMATE, ymin=MIN, ymax=MAX, group=CHARTLABEL, color=CHARTLABEL)) + 
+      geom_line(aes(color=CHARTLABEL),size = 1.5, alpha=.50) +  
+      geom_point(size=2.0, show.legend = FALSE)+
+      
+      # error ribbon
+      geom_ribbon(aes(ymin=MIN, ymax=MAX, fill= CHARTLABEL), alpha=0.1, show.legend = FALSE, colour=F) + 
+       
+      #labels in chart space, paste appropriate symbols, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                          paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                 drop0trailing = FALSE), "%", RELIABILITY),
+                                          paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                 drop0trailing = TRUE), "%", RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, 
+                      nudge_x = 0, nudge_y = .1, direction = "y", show.legend = FALSE)+ 
+
+      # add the % symbol to the values in axis and adjust limits to be automated and adds the function "expand".
+      scale_y_continuous(labels=function(ESTIMATE) paste0(ESTIMATE, "%"),
+                         limits=c(min(trendpercent$YMIN[trendpercent$SAVETITLE==title_list[i]]),
+                                  max(trendpercent$YMAX[trendpercent$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         )+
+      
+      scale_x_continuous(breaks=c(trendpercent$YEAR[trendpercent$SAVETITLE==title_list[i]]),
+                         expand = expansion(mult = .1))+
+  
+      # specify colors for lines
+      scale_color_manual(label = function(CHARTLABEL) str_wrap(CHARTLABEL, 20), values = colors1)+ 
+      scale_fill_manual("CHARTLABEL", values = colors1) +
+      guides(color = guide_legend(byrow = T)) +
+
+      # automates title and specified x and y labels as blank
+      ggtitle(title_list[i])+
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trendpercent$FIGNUM[trendpercent$SAVETITLE == title_list[i]], " ",
+            trendpercent$CHARTTITLE[trendpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = trendpercent$CHARTSUBTITLE[trendpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]] != "" & 
+                  trendpercent$CHARTNOTES[trendpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trendpercent$rNOTE[trendpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trendpercent$SOURCE[trendpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      line_theme()
+      
+      #Save as png
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trendpercent.graph(trendpercent, ESTIMATE)
+```
+
+## Count multiple trendline
+```{r trendcount mult}
+trendcount <- filter(trendline.m, NUMTYPE == 2)
+
+  # create graphing function
+  trendcount.graph <- function(trendcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trendcount$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trendcount, trendcount$SAVETITLE==title_list[i]),
+             aes(x=YEAR, y=ESTIMATE, ymin=MIN, ymax=MAX, group=CHARTLABEL, color=CHARTLABEL)) + 
+      geom_line(aes(color=CHARTLABEL),size = 1.5, alpha=.50) +  
+      geom_point(size=2.0, show.legend = FALSE)+
+      
+      # error ribbon
+      geom_ribbon(aes(ymin=MIN, ymax=MAX, fill= CHARTLABEL), alpha=0.1, show.legend = FALSE, colour=F) + 
+       
+      #labels in chart space, paste appropriate symbols, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                          paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                 drop0trailing = FALSE), RELIABILITY),
+                                          paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                 drop0trailing = TRUE), RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, 
+                      nudge_x = 0, nudge_y = .1, direction = "y", show.legend = FALSE)+ 
+
+      # add the % symbol to the values in axis and adjust limits to be automated and adds the function "expand".
+      scale_y_continuous(labels=function(ESTIMATE) paste0(ESTIMATE),
+                         limits=c(min(trendcount$YMIN[trendcount$SAVETITLE==title_list[i]]),
+                                  max(trendcount$YMAX[trendcount$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         )+
+      
+      scale_x_continuous(breaks=c(trendcount$YEAR[trendcount$SAVETITLE==title_list[i]]),
+                         expand = expansion(mult = .1))+
+  
+      # specify colors for lines
+      scale_color_manual(label = function(CHARTLABEL) str_wrap(CHARTLABEL, 20), values = colors1)+ 
+      scale_fill_manual("CHARTLABEL", values = colors1) +
+      guides(color = guide_legend(byrow = T)) +
+
+      # automates title and specified x and y labels as blank
+      ggtitle(title_list[i])+
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trendcount$FIGNUM[trendcount$SAVETITLE == title_list[i]], " ",
+            trendcount$CHARTTITLE[trendcount$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = trendcount$CHARTSUBTITLE[trendcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]] != "" & 
+                  trendcount$CHARTNOTES[trendcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trendcount$rNOTE[trendcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trendcount$SOURCE[trendcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      line_theme()
+      
+      #Save as png
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trendcount.graph(trendcount, ESTIMATE)
+```
+
+## Dollar multiple trendline
+```{r trenddollar mult}
+trenddollar <- filter(trendline.m, NUMTYPE == 3)
+
+  # create graphing function
+  trenddollar.graph <- function(trenddollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(trenddollar$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in trend, adds error bars to plot, establish position and change color
+    plot <- 
+      ggplot(subset(trenddollar, trenddollar$SAVETITLE==title_list[i]),
+             aes(x=YEAR, y=ESTIMATE, ymin=MIN, ymax=MAX, group=CHARTLABEL, color=CHARTLABEL)) + 
+      geom_line(aes(color=CHARTLABEL),size = 1.5, alpha=.50) +  
+      geom_point(size=2.0, show.legend = FALSE)+
+      
+      # error ribbon
+      geom_ribbon(aes(ymin=MIN, ymax=MAX, fill= CHARTLABEL), alpha=0.1, show.legend = FALSE, colour=F) + 
+       
+      #labels in chart space, paste appropriate symbols, adjust color and position
+      geom_text_repel(aes(label = if_else(DECIMAL == 1, 
+                                          paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", 
+                                                 drop0trailing = FALSE), RELIABILITY),
+                                          paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",",
+                                                 drop0trailing = TRUE), RELIABILITY))),
+                      size=4, fontface='bold', force=1,  segment.color = 'transparent', 
+                      min.segment.length = 0, segment.size = 0,  point.padding = .3, 
+                      nudge_x = 0, nudge_y = .1, direction = "y", show.legend = FALSE)+ 
+
+      # add the % symbol to the values in axis and adjust limits to be automated and adds the function "expand".
+      scale_y_continuous(labels=function(ESTIMATE) paste0("$", ESTIMATE),
+                         limits=c(min(trenddollar$YMIN[trenddollar$SAVETITLE==title_list[i]]),
+                                  max(trenddollar$YMAX[trenddollar$SAVETITLE==title_list[i]])),
+                         expand = expansion(mult = .1),
+                         breaks = breaks_pretty()
+                         )+
+      
+      scale_x_continuous(breaks=c(trenddollar$YEAR[trenddollar$SAVETITLE==title_list[i]]),
+                         expand = expansion(mult = .1))+
+  
+      # specify colors for lines
+      scale_color_manual(label = function(CHARTLABEL) str_wrap(CHARTLABEL, 20), values = colors1)+ 
+      scale_fill_manual("CHARTLABEL", values = colors1) +
+      guides(color = guide_legend(byrow = T)) +
+
+      # automates title and specified x and y labels as blank
+      ggtitle(title_list[i])+
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            trenddollar$FIGNUM[trenddollar$SAVETITLE == title_list[i]], " ",
+            trenddollar$CHARTTITLE[trenddollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = trenddollar$CHARTSUBTITLE[trenddollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]] != "" & 
+                  trenddollar$CHARTNOTES[trenddollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(trenddollar$rNOTE[trenddollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(trenddollar$SOURCE[trenddollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) +
+      
+      line_theme()
+      
+      #Save as png
+      ggsave(plot, file=paste0(path, title_list[i], device = ".png"), width=8, height=5)
+      print(plot)
+  }
+}
+
+# run graphing function 
+trenddollar.graph(trenddollar, ESTIMATE)
+```
+
+# Lollipop chart
+
+## Percent lollipop
+```{r segpercent}
+segpercent <- filter(segment, NUMTYPE == 1)
+
+# create graphing function
+segpercent.graph <- function(segpercent, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(segpercent$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in segpercent, adds error bars to plot, 
+    plot <- ggplot(subset(segpercent, segpercent$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = ESTIMATE)) + 
+      geom_segment(aes(xend = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = 0, yend = ESTIMATE), color = "gray60") +
+      geom_point(color = color1, size = 3.5, alpha = 0.6) +
+
+      # labels in chart space, paste appropriate symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F), "%", 
+                               RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T), "%",
+                               RELIABILITY))), 
+                size = 3.5,
+                hjust=-.4, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(segpercent$MIN[segpercent$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE, "%"),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(segpercent$MAX[segpercent$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(.1,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            segpercent$FIGNUM[segpercent$SAVETITLE == title_list[i]], " ",
+            segpercent$CHARTTITLE[segpercent$SAVETITLE == title_list[i]], ", ",
+            segpercent$YEAR[segpercent$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = segpercent$CHARTSUBTITLE[segpercent$SAVETITLE == title_list[i]],
+        
+        caption = if_else(segpercent$CHARTNOTES[segpercent$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(segpercent$CHARTNOTES[segpercent$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(segpercent$rNOTE[segpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segpercent$SOURCE[segpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(segpercent$rNOTE[segpercent$SAVETITLE == title_list[i]] != "" & 
+                  segpercent$CHARTNOTES[segpercent$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(segpercent$rNOTE[segpercent$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segpercent$SOURCE[segpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(segpercent$SOURCE[segpercent$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme() +
+      theme(
+        panel.grid.major.x = element_line(size=.1, color="grey65"),
+        axis.ticks = element_blank(),
+        #axis.ticks.y = element_line(color = "gray60"),
+        axis.line = element_blank()
+      )
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+segpercent.graph(segpercent, ESTIMATE)
+```
+
+## Count lollipop
+```{r segcount}
+segcount <- filter(segment, NUMTYPE == 2)
+
+# create graphing function
+segcount.graph <- function(segcount, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(segcount$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in segcount, adds error bars to plot, 
+    plot <- ggplot(subset(segcount, segcount$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = ESTIMATE)) + 
+      geom_segment(aes(xend = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = 0, yend = ESTIMATE), color = "gray60") +
+      geom_point(color = color1, size = 3.5, alpha = 0.6) +
+
+      # labels in chart space, paste appropriate symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0(formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F), 
+                               RELIABILITY),
+                        paste0(formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T),
+                               RELIABILITY))), 
+                size = 3.5,
+                hjust=-.4, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(segcount$MIN[segcount$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0(ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(segcount$MAX[segcount$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(.1,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            segcount$FIGNUM[segcount$SAVETITLE == title_list[i]], " ",
+            segcount$CHARTTITLE[segcount$SAVETITLE == title_list[i]], ", ",
+            segcount$YEAR[segcount$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = segcount$CHARTSUBTITLE[segcount$SAVETITLE == title_list[i]],
+        
+        caption = if_else(segcount$CHARTNOTES[segcount$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(segcount$CHARTNOTES[segcount$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(segcount$rNOTE[segcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segcount$SOURCE[segcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(segcount$rNOTE[segcount$SAVETITLE == title_list[i]] != "" & 
+                  segcount$CHARTNOTES[segcount$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(segcount$rNOTE[segcount$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segcount$SOURCE[segcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(segcount$SOURCE[segcount$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme() +
+      theme(
+        panel.grid.major.x = element_line(size=.1, color="grey65"),
+        axis.ticks = element_blank(),
+        #axis.ticks.y = element_line(color = "gray60"),
+        axis.line = element_blank()
+      )
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+segcount.graph(segcount, ESTIMATE)
+```
+
+## Dollar lollipop
+```{r segdollar}
+segdollar <- filter(segment, NUMTYPE == 3)
+
+# create graphing function
+segdollar.graph <- function(segdollar, na.rm = TRUE, ...){
+  
+  # create list of title in data to loop over 
+  title_list <- unique(segdollar$SAVETITLE)
+  
+  # create for loop to produce ggplot2 graphs 
+  for (i in seq_along(title_list)) { 
+    
+    # create plot for each title in segdollar, adds error bars to plot, 
+    plot <- ggplot(subset(segdollar, segdollar$SAVETITLE == title_list[i]),
+        aes(x = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = ESTIMATE)) + 
+      geom_segment(aes(xend = reorder(str_wrap(CHARTLABEL,23), ESTIMATE), y = 0, yend = ESTIMATE), color = "gray60") +
+      geom_point(color = color1, size = 3.5, alpha = 0.6) +
+
+      # labels in chart space, paste appropriate symbols, adjust color and position.
+      geom_text(aes(label = if_else(DECIMAL == 1,
+                        paste0("$", formatC(ESTIMATE, format="f", digits=1, big.mark = ",", drop0trailing = F), 
+                               RELIABILITY),
+                        paste0("$", formatC(ESTIMATE, format="f", digits=0, big.mark = ",", drop0trailing = T),
+                               RELIABILITY))), 
+                size = 3.5,
+                hjust=-.4, 
+                color = color1,
+                fontface="bold",
+                vjust = if_else(segdollar$MIN[segdollar$SAVETITLE == title_list[i]] >= 0, -0.67, 0))+  
+      
+      coord_flip()+
+      
+      #add the % symbol to the values in axis and adjust limits
+      scale_y_continuous(
+        labels = function(ESTIMATE) paste0("$", ESTIMATE),        
+        expand = expansion(mult = c(0, .2)),
+        limits = c(0, max(segdollar$MAX[segdollar$SAVETITLE == title_list[i]])))+
+        
+      scale_x_discrete(expand = expansion(c(.1,.1))) +
+      
+      # chart text
+      ggtitle(title_list[i]) + 
+      labs(
+        x = "", y = "",
+        title = str_wrap(
+          paste0(
+            segdollar$FIGNUM[segdollar$SAVETITLE == title_list[i]], " ",
+            segdollar$CHARTTITLE[segdollar$SAVETITLE == title_list[i]], ", ",
+            segdollar$YEAR[segdollar$SAVETITLE == title_list[i]]
+            ), 80
+          ), 
+        
+        subtitle = segdollar$CHARTSUBTITLE[segdollar$SAVETITLE == title_list[i]],
+        
+        caption = if_else(segdollar$CHARTNOTES[segdollar$SAVETITLE == title_list[i]] != "", 
+                          
+          paste0(
+          str_wrap(segdollar$CHARTNOTES[segdollar$SAVETITLE == title_list[i]], 100), "\n",
+          str_wrap(segdollar$rNOTE[segdollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segdollar$SOURCE[segdollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+          
+          if_else(segdollar$rNOTE[segdollar$SAVETITLE == title_list[i]] != "" & 
+                  segdollar$CHARTNOTES[segdollar$SAVETITLE == title_list[i]] == "",
+          
+          paste0(
+          str_wrap(segdollar$rNOTE[segdollar$SAVETITLE == title_list[i]], 100), "\n",
+          "Source: ",
+          str_wrap(segdollar$SOURCE[segdollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org),
+                  
+          paste0(
+          "Source: ",
+          str_wrap(segdollar$SOURCE[segdollar$SAVETITLE == title_list[i]], 100),
+          "\n", "Prepared by XX for ", org)
+          ))
+      ) + 
+    
+      chart_theme() +
+      theme(
+        panel.grid.major.x = element_line(size=.1, color="grey65"),
+        axis.ticks = element_blank(),
+        #axis.ticks.y = element_line(color = "gray60"),
+        axis.line = element_blank()
+      )
+    
+    #save as png
+    ggsave(plot, file = paste0(path, title_list[i], device = ".png"), width = 8, height = 5)
+    print(plot)
+  }
+}
+
+# run graphing function 
+segdollar.graph(segdollar, ESTIMATE)
+```
+
+# Facet charts
+
+Any of the chart types above can be modified into a facet chart (multiple charts in one image). 
+Facet charts work best when you're trying to compare multiple things at once, but crowding them in one chart space
+would make them hard to see or if you easily want to compare two or more charts.
+
+The only line of code you add to any of the chart types above would be the following:
+'facet_wrap(~FACET, nrow = 2, ncol = 1) +'
+
+FACET is a column in the data sheet where you specify the different charts you want separated, similar to GROUPLABEL, 
+nrow specifies how many rows you want and ncol specifies how many columns, i.e. the grid layout for the charts
+
+To modify facet chart title text, use the following line of code:
+'theme(strip.text = element_text(size = 11))'
+
+# END
